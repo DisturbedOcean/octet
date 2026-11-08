@@ -68,7 +68,8 @@ function identity(value) {
 function request(context, options) {
   fields(context, ['messages', 'systemPrompt', 'tools'], 'nested inference context');
   if (context.tools !== undefined && (!Array.isArray(context.tools) || context.tools.length)) unsupported('nested inference tools', 'nested inference cannot grant tool execution');
-  fields(options, ['signal', 'maxTokens', 'temperature', 'reasoning'], 'nested inference options');
+  // sessionId only steers provider prompt-cache affinity; the host request carries none, so dropping it costs at most a cache hit.
+  fields(options, ['signal', 'maxTokens', 'temperature', 'reasoning', 'sessionId'], 'nested inference options');
   if (options.signal !== undefined && !(options.signal instanceof AbortSignal)) invalid('nested inference signal');
   if (options.reasoning !== undefined && !efforts.has(options.reasoning)) invalid('nested inference reasoning');
   if (options.maxTokens !== undefined && (!Number.isSafeInteger(options.maxTokens) || options.maxTokens <= 0)) invalid('nested inference token limit');

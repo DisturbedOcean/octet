@@ -300,6 +300,16 @@ test('modelRegistry lists registered provider ids and returns their configs', as
   assert.deepEqual(registry.getRegisteredProviderIds(), []);
 });
 
+test('modelRegistry.streamSimple runs an extension-owned provider stream with a plain context', async () => {
+  let call;
+  const value = await registered((model, context, options) => { call = { model, context, options }; return 'stream'; });
+  const registry = modelRegistry(() => ({}), value.runtime);
+  const strictSystem = new Proxy({ role: 'system', content: 'prompt' }, { get(target, key) { if (key === 'timestamp') throw new Error('unsupported'); return Reflect.get(target, key); } });
+  assert.equal(registry.streamSimple({ provider: 'pi-local-provider', id: 'virtual/model' }, { messages: [strictSystem] }, { sessionId: 's' }), 'stream');
+  assert.equal(call.model.id, 'virtual/model');
+  assert.deepEqual(call.context, { messages: [{ role: 'system', content: 'prompt' }] });
+  assert.deepEqual(call.options, { sessionId: 's' });
+});
 
 test('model provider is rebased and per-model baseUrl overrides provider endpoint', async () => {
   let selected;

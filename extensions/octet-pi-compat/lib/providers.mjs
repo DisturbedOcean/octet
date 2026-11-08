@@ -97,7 +97,14 @@ export function modelRegistry(getHost, runtime = {}) {
     }),
     getAll: () => all(),
     find: (provider, id) => all().find(model => model.provider === provider && model.id === id),
-    streamSimple: (model, context, options) => streamRegistryModel(runtime, model, context, options),
+    streamSimple: (model, context, options) => {
+      // An extension-owned provider streams with its own endpoint and key, as under Pi; host nested inference only admits model-tool parents.
+      const entry = providers(runtime).committed.get(model?.provider);
+      const own = entry && !entry.inherited && !entry.custom && entry.models?.find(candidate => candidate.pi.id === model.id);
+      if (!own) return streamRegistryModel(runtime, model, context, options);
+      // The JSON copy drops strict proxies: Pi's own provider code reads absent message fields as undefined.
+      return withNativeProvider(runtime, { entry }, () => entry.stream(structuredClone(own.pi), JSON.parse(JSON.stringify(context)), options));
+    },
     // Pi: whether the model's provider authenticates with a subscription login.
     // The host states it, from the provider's own authentication resolver, for
     // every model it describes. A model it did not describe, or one whose

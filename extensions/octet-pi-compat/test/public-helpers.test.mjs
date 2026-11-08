@@ -72,6 +72,13 @@ test('message conversion excludes private details and preserves original LLM mes
   ]).startsWith('[Assistant thinking]: plan\n\n[Assistant]: answer\n\n[Assistant tool calls]: read(path="a")'), true);
 });
 
+test('message conversion passes a timestamp-less system message through, as Pi does', () => {
+  const system = new Proxy({ role: 'system', content: 'prompt' }, {
+    get(target, key) { if (key === 'timestamp') throw new Error('unsupported_feature system message.timestamp'); return Reflect.get(target, key); },
+  });
+  assert.equal(helpers.convertToLlm([system])[0], system);
+});
+
 test('file mutation queue serializes aliases, releases on failure and permits other files', async t => {
   const dir = await mkdtemp(join(tmpdir(), 'octet-pi-helpers-'));
   t.after(() => rm(dir, { recursive: true, force: true }));

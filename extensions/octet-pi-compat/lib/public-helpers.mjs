@@ -125,13 +125,14 @@ function bashExecutionToText(message) {
 }
 export function convertToLlm(messages) {
   return messages.flatMap(message => {
+    // Pi returns these unchanged, so their timestamps (absent on a system message) are never read.
+    if (['system', 'user', 'assistant', 'toolResult'].includes(message.role)) return [message];
     const { timestamp } = message;
     switch (message.role) {
       case 'bashExecution': return message.excludeFromContext ? [] : [{ role: 'user', content: [{ type: 'text', text: bashExecutionToText(message) }], timestamp }];
       case 'custom': return [{ role: 'user', content: typeof message.content === 'string' ? [{ type: 'text', text: message.content }] : message.content, timestamp }];
       case 'branchSummary': return [{ role: 'user', content: [{ type: 'text', text: `The following is a summary of a branch that this conversation came back from:\n\n<summary>\n${message.summary}</summary>` }], timestamp }];
       case 'compactionSummary': return [{ role: 'user', content: [{ type: 'text', text: `The conversation history before this point was compacted into the following summary:\n\n<summary>\n${message.summary}\n</summary>` }], timestamp }];
-      case 'system': case 'user': case 'assistant': case 'toolResult': return [message];
       default: return [];
     }
   });
