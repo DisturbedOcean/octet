@@ -10,6 +10,7 @@ import { getSystemMessageText } from '../shims/pi-1.0.2/ai/text.mjs';
 import { performance } from 'node:perf_hooks';
 import { traceEnabled, tracePhase } from './startup-trace.mjs';
 import { customOpenAiChatProfile, prepareCustomProviderHttp, closeCustomProviderHttp } from './custom-provider-http.mjs';
+import { helper } from '../shims/local-pi.mjs';
 
 const scopeKey = Symbol.for('octet.pi.nativeProvider.scope');
 const scope = globalThis[scopeKey] ??= new AsyncLocalStorage();
@@ -149,11 +150,14 @@ function delegatedStream(runtime, job, model, context, options, customHttp, cust
   })();
   return stream;
 }
-function anthropicDelegate(model, context, options) {
+const installedAnthropic = { stream: helper('ai', 'streamAnthropic'), streamSimple: helper('ai', 'streamSimpleAnthropic') };
+// An extension-owned provider's request brings its own endpoint and key, so it runs Pi's own stream; everything else stays host-delegated.
+const anthropicDelegate = kind => (model, context, options) => {
   if (model.api !== 'anthropic-messages') unsupported('native Anthropic model API');
-  return nativeProviderDelegate(model, context, options);
-}
-export const anthropicMessagesApi = () => ({ streamSimple: anthropicDelegate, stream: anthropicDelegate });
+  const job = scope.getStore()?.job;
+  return job && !job.entry.inherited ? installedAnthropic[kind](model, context, options) : nativeProviderDelegate(model, context, options);
+};
+export const anthropicMessagesApi = () => ({ streamSimple: anthropicDelegate('streamSimple'), stream: anthropicDelegate('stream') });
 
 const facadeGetters = globalThis[Symbol.for('octet.pi.nativeProvider.facadeGetters')] ??= new WeakMap();
 export const isNativeProviderFacade = provider => facadeGetters.get(provider.getModels) === provider.id;

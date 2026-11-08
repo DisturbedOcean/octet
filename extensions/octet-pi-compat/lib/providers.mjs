@@ -14,9 +14,14 @@ import { traceEnabled, tracePhase } from './startup-trace.mjs';
 import { readPiSettings } from './pi-setup.mjs';
 import { getSupportedThinkingLevels } from '../shims/pi-1.0.2/ai/models.mjs';
 import { createHash } from 'node:crypto';
+import { rememberReply, restoreReplies } from './extension-signatures.mjs';
 
 const levels = new Set(['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']);
 const protocols = { 'openai-completions': 'openai_chat', 'openai-responses': 'openai_responses', 'anthropic-messages': 'anthropic_messages', 'google-generative-ai': 'google_generative_ai' };
+// Model fields only the extension's own stream reads (Pi 1.5 request shaping); the host route ignores them.
+const EXTENSION_STREAM_MODEL_FIELDS = ['compat', 'headers', 'output', 'type'];
+// shortcut: Pi 1.5 model refresh, classifiers and image APIs have no octet contract and are dropped, so only catalogs the extension registers itself appear; upgrade when octet adds them.
+const PI_ONLY_PROVIDER_OPTIONS = ['refreshModels', 'classifiers', 'images'];
 const needsGoogle = entry => entry?.google || entry?.config.api === 'google-generative-ai' || entry?.models?.some(model => model.pi.api === 'google-generative-ai');
 const providers = providerState;
 // Loading is sequential and no providers have been committed yet. Restore the
@@ -186,7 +191,8 @@ function providerBaseUrl(value) {
 function declaration(name, config, factory, inherited = false) {
   bounded(name, 'provider name', 64);
   if (!/^[a-z][a-z0-9_-]*$/.test(name)) unsupported('provider name', 'native provider names must be lowercase ASCII identifiers');
-  fields(config, ['baseUrl', 'apiKey', 'api', 'models', 'streamSimple'], 'registerProvider config');
+  fields(config, ['name', 'baseUrl', 'apiKey', 'api', 'models', 'streamSimple'], 'registerProvider config');
+  if (config.name !== undefined) bounded(config.name, 'provider label', 128);
   if (config.streamSimple !== undefined && typeof config.streamSimple !== 'function') invalid('provider streamSimple');
   if (!inherited && config.streamSimple && !config.api) invalid('provider api is required with streamSimple');
   // A provider API Pi itself does not ship is legal in Pi when the extension
@@ -202,7 +208,7 @@ function declaration(name, config, factory, inherited = false) {
   if (!Array.isArray(config.models) || !config.models.length || config.models.length > 256) invalid('provider models must contain 1..256 explicit definitions');
   const ids = new Set();
   const models = config.models.map(model => {
-    fields(model, ['id', 'name', 'api', 'provider', 'baseUrl', 'reasoning', 'thinkingLevelMap', 'input', 'cost', 'contextWindow', 'maxTokens'], 'provider model');
+    fields(model, ['id', 'name', 'api', 'provider', 'baseUrl', 'reasoning', 'thinkingLevelMap', 'input', 'cost', 'contextWindow', 'maxTokens', ...(ownStream ? EXTENSION_STREAM_MODEL_FIELDS : [])], 'provider model');
     const { thinkingLevelMap, ...definition } = model;
     model = definition;
     if (thinkingLevelMap !== undefined) {
@@ -223,12 +229,12 @@ function declaration(name, config, factory, inherited = false) {
     const pricing = inherited && model.cost == null ? null : providerPricing(model.cost);
     const reasoningOptions = model.reasoning && model.thinkingLevelMap !== undefined ? { values: getSupportedThinkingLevels(model), default: null } : undefined;
     if (reasoningOptions?.values.length === 0) unsupported('model thinkingLevelMap', 'no selectable reasoning level');
-    return { pi: { ...plainJSON(model, 'provider model'), api, provider: name, baseUrl: modelBaseUrl }, wire: { id: `m-${createHash('sha256').update(model.id).digest('hex').slice(0, 32)}`, api_name: model.id, display_name: model.name, protocol: protocolFor(api), context_window: model.contextWindow, max_output_tokens: model.maxTokens,
+    return { pi: { ...plainJSON(model, 'provider model', 65536, { omitUndefined: true }), api, provider: name, baseUrl: modelBaseUrl }, wire: { id: `m-${createHash('sha256').update(model.id).digest('hex').slice(0, 32)}`, api_name: model.id, display_name: model.name, protocol: protocolFor(api), context_window: model.contextWindow, max_output_tokens: model.maxTokens,
       capabilities: { tools: true, parallel_tool_calls: true, structured_output: false, reasoning: model.reasoning }, pi_metadata: { base_url: modelBaseUrl, input: [...model.input], pricing,
         ...(reasoningOptions === undefined ? {} : { reasoning_options: reasoningOptions }) } } };
   });
   return { name, factory, config, stream: config.streamSimple, apiKey: config.apiKey, models,
-    wire: { provider: { id: name, label: name, auth: { kind: 'none' } }, models: models.map(model => model.wire) } };
+    wire: { provider: { id: name, label: config.name ?? name, auth: { kind: 'none' } }, models: models.map(model => model.wire) } };
 }
 function enqueue(runtime, action) {
   const state = providers(runtime);
@@ -279,8 +285,12 @@ function mutation(runtime, factory, name, entry) {
     runtime.require('provider_proxy_v1');
     if (entry?.inherited) runtime.require('provider_inheritance_v1');
     if (needsGoogle(entry)) runtime.require('provider_google_generative_ai_v1');
-    store = runtime.current(factory);
-    store.controller.signal.throwIfAborted();
+    try { store = runtime.current(factory); }
+    catch (error) {
+      // Pi lets activation-time discovery register providers once it lands; that work outlives its load scope, so it has no session owner.
+      if (error?.message !== 'not_foreground_owner retained context is unavailable') throw error;
+    }
+    store?.controller.signal.throwIfAborted();
   }
   const revision = Symbol();
   state.revisions.set(name, revision);
@@ -327,7 +337,17 @@ export function registerProvider(runtime, factory, name, config) {
     mutation(runtime, factory, id, entry);
     return;
   }
-  fields(config, ['baseUrl', 'apiKey', 'api', 'models', 'streamSimple'], 'registerProvider config');
+  if (typeof config?.streamSimple === 'function') {
+    config = Object.fromEntries(Object.entries(config).filter(([key]) => !PI_ONLY_PROVIDER_OPTIONS.includes(key)));
+    if (Array.isArray(config.models)) {
+      config.models = config.models.filter(model => model?.type === undefined || model.type === 'chat');
+      if (!config.models.length) {
+        if (state.desired.has(name)) unregisterProvider(runtime, factory, name);
+        return;
+      }
+    }
+  }
+  fields(config, ['name', 'baseUrl', 'apiKey', 'api', 'models', 'streamSimple'], 'registerProvider config');
   if (config.streamSimple && !config.api) invalid('provider api is required with streamSimple');
   const effective = { ...state.registered.get(name) };
   for (const [key, value] of Object.entries(config)) if (value !== undefined) effective[key] = value;
@@ -365,7 +385,10 @@ export function startProviderRegistration(runtime) {
 function requestContext(request, runtime) {
   if ((request.tool_choice !== 'auto' && !(request.tool_choice === 'none' && !request.tools?.length)) || request.stop?.length || request.responses != null || request.output_format?.type !== 'text' || (request.reasoning_mode !== undefined && request.reasoning_mode !== 'standard')) unsupported('provider request', 'tool constraints, stop sequences, Responses replay and structured output are not supported by streamSimple');
   const tools = (request.tools || []).map(tool => {
-    if (tool.async || tool.constrained_sampling != null) unsupported('provider tool', 'async/constrained sampling cannot be dropped');
+    // `async` is only a provider scheduling hint (background and parallel-read tools); dropping it leaves calls in order.
+    // Like native routes without OpenAI grammar tools, grammar and preferred strict schemas fall back to the plain schema; only `require` cannot.
+    const constrained = tool.constrained_sampling;
+    if (constrained != null && constrained.type !== 'grammar' && !(constrained.type === 'json_schema' && constrained.strict !== 'require')) unsupported('provider tool', 'required strict sampling cannot be dropped');
     // A Pi extension's own tool reaches the package's stream as Pi passes it:
     // the definition the extension registered (JSON round-trip, as Pi's
     // toToolDeclaration), not the host's normalized copy of its schema.
@@ -451,13 +474,17 @@ export async function prepareProviderStream(runtime, params, store) {
     runtime.require('provider_request_hooks_v1');
   }
   const preparedAt = traceEnabled ? performance.now() : 0;
-  const context = requestContext(params.request, runtime), controller = new AbortController();
+  const transcript = requestContext(params.request, runtime), controller = new AbortController();
+  const ownStream = !entry.inherited && !entry.custom;
+  const context = ownStream ? { ...transcript, messages: restoreReplies(runtime, transcript.messages) } : transcript;
   // Pi's agent passes no maxTokens to provider streams; the model's own limit
   // applies inside the package's code exactly as under Pi.
   const options = { signal: controller.signal, apiKey: entry.apiKey, maxTokens: undefined,
     temperature: params.request.temperature ?? undefined, cacheRetention: params.request.cache_retention, sessionId: piSessionId(params.request.session_id),
     reasoning: undefined, onPayload: undefined, onResponse: undefined, transformHeaders: undefined, ...piRequestOptions(runtime, store),
-    ...(params.request_hooks ? providerRequestCallbacks(runtime, params.stream_id, controller) : {}) };
+    ...(params.request_hooks ? providerRequestCallbacks(runtime, params.stream_id, controller) : {}),
+    // Options Pi leaves unset that an extension's own stream probes before spreading them into its request.
+    ...(ownStream ? { headers: undefined, metadata: undefined, fetch: undefined } : {}) };
   const reasoning = params.request.reasoning;
   if (reasoning?.type === 'effort' && levels.has(reasoning.value)) options.reasoning = reasoning.value;
   else if (reasoning?.type !== 'off') unsupported('provider reasoning', 'only portable effort controls are supported');
@@ -479,7 +506,9 @@ export function startProviderStream(runtime, id) {
   };
   const run = async () => {
     job.controller.signal.throwIfAborted();
-    const blocks = new Map(); let started = false, finished = false;
+    const blocks = new Map(); let started = false, finished = false, forwarded = 0;
+    // Host routes other than these require opaque reasoning state that provider events cannot carry, so that thinking stays in the adapter.
+    const hideThinking = !job.entry.inherited && !job.entry.custom && !['openai_chat', 'google_generative_ai'].includes(job.model.wire.protocol);
     let model = structuredClone(job.model.pi);
     if (job.entry.custom) {
       const signal = AbortSignal.any([job.controller.signal, job.entry.controller.signal]);
@@ -508,7 +537,7 @@ export function startProviderStream(runtime, id) {
         const next = await Promise.race([iterator.next(), abort]);
         if (next.done) invalid('provider stream missing terminal event');
         const event = next.value;
-        if (event.partial?.content?.some((part, index) => (part.thinkingSignature || part.textSignature || part.redacted) && !isDeepStrictEqual(part, job.nativeMessage?.content[index]))) unsupported('provider opaque replay signatures');
+        if (job.delegated && event.partial?.content?.some((part, index) => (part.thinkingSignature || part.textSignature || part.redacted) && !isDeepStrictEqual(part, job.nativeMessage?.content[index]))) unsupported('provider opaque replay signatures');
         if (event.type === 'error') throw rpcError(-32002, 'custom provider returned an error');
         if (event.type === 'start') {
           if (started) invalid('duplicate provider start'); started = true; await emit('started', {}); continue;
@@ -520,13 +549,14 @@ export function startProviderStream(runtime, id) {
           if (!Array.isArray(message?.content) || message.content.length !== blocks.size) invalid('provider final content differs from stream');
           for (let index = 0; index < message.content.length; index++) {
             const part = message.content[index], block = blocks.get(index);
-            if (!block || ((part.thinkingSignature || part.textSignature || part.redacted) && !isDeepStrictEqual(part, job.nativeMessage?.content[index]))) unsupported('provider final content/signatures');
+            if (!block || (job.delegated && (part.thinkingSignature || part.textSignature || part.redacted) && !isDeepStrictEqual(part, job.nativeMessage?.content[index]))) unsupported('provider final content/signatures');
             if (block.kind === 'toolcall' ? !isDeepStrictEqual(part, block.final) : part.type !== (block.kind === 'thinking' ? 'thinking' : 'text') || (part.text ?? part.thinking) !== block.text) invalid('provider final content differs from stream');
           }
           const usage = message.usage;
           for (const key of ['input', 'output', 'cacheRead', 'cacheWrite', 'totalTokens']) if (!Number.isSafeInteger(usage?.[key]) || usage[key] < 0) invalid('provider usage');
           const reason = { stop: 'end_turn', length: 'max_tokens', toolUse: 'tool_use' }[event.reason];
           if (!reason) unsupported(`provider stop reason ${event.reason}`);
+          if (!job.delegated) rememberReply(runtime, message);
           await emit('usage', { input_tokens: usage.input, output_tokens: usage.output, cache_read_tokens: usage.cacheRead, cache_write_tokens: usage.cacheWrite, total_tokens: usage.totalTokens });
           await emit('finished', { stop_reason: reason }); finished = true; continue;
         }
@@ -535,12 +565,14 @@ export function startProviderStream(runtime, id) {
         const [, kind, phase] = match, index = event.contentIndex, native = { text: 'text', thinking: 'reasoning', toolcall: 'tool_call' }[kind];
         if (phase === 'start') {
           if (blocks.has(index)) invalid('duplicate provider content block');
-          const block = { kind, text: '', ended: false }; blocks.set(index, block);
+          const block = { kind, text: '', ended: false, hidden: hideThinking && kind === 'thinking' }; blocks.set(index, block);
+          if (block.hidden) continue;
+          block.host = forwarded++;
           const part = event.partial?.content?.[index];
-          await emit(`${native}_start`, { index, ...(kind === 'toolcall' ? { id: identifier(part?.id, 'tool call id'), name: identifier(part?.name, 'tool name') } : {}) });
+          await emit(`${native}_start`, { index: block.host, ...(kind === 'toolcall' ? { id: identifier(part?.id, 'tool call id'), name: identifier(part?.name, 'tool name') } : {}) });
         } else {
           const block = blocks.get(index); if (!block || block.kind !== kind || block.ended) invalid('unbalanced provider content event');
-          if (phase === 'delta') { const delta = bounded(event.delta, 'provider delta', 131072, { controls: true }); block.text += delta; bounded(block.text, 'provider block', 786432, { controls: true }); await emit(kind === 'toolcall' ? 'tool_call_args_delta' : `${native}_delta`, { index, delta }); }
+          if (phase === 'delta') { const delta = bounded(event.delta, 'provider delta', 131072, { controls: true }); block.text += delta; bounded(block.text, 'provider block', 786432, { controls: true }); if (!block.hidden) await emit(kind === 'toolcall' ? 'tool_call_args_delta' : `${native}_delta`, { index: block.host, delta }); }
           else {
             if (kind === 'toolcall') {
               const final = plainJSON(event.toolCall, 'provider tool call');
@@ -548,7 +580,7 @@ export function startProviderStream(runtime, id) {
               if (!isDeepStrictEqual(args, final.arguments)) invalid('provider final tool arguments differ from deltas');
               block.final = final;
             } else if (event.content !== block.text) invalid('provider final text differs from deltas');
-            block.ended = true; await emit(`${native}_end`, { index });
+            block.ended = true; if (!block.hidden) await emit(`${native}_end`, { index: block.host });
           }
         }
       }

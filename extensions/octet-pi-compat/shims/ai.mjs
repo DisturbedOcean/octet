@@ -44,6 +44,8 @@ export const streamOpenAICompletions = helper('ai', 'streamOpenAICompletions');
 export const streamSimpleOpenAICompletions = helper('ai', 'streamSimpleOpenAICompletions');
 export const streamOpenAIResponses = helper('ai', 'streamOpenAIResponses');
 export const streamSimpleOpenAIResponses = helper('ai', 'streamSimpleOpenAIResponses');
+export const googleGenerativeAIApi = () => ({ stream: streamGoogle, streamSimple: streamSimpleGoogle });
+export const openAICompletionsApi = () => ({ stream: streamOpenAICompletions, streamSimple: streamSimpleOpenAICompletions });
 
 export { anthropicMessagesApi } from '../lib/native-provider.mjs';
 // Tool-call argument parsing and validation moved with Pi 1.5 (pi-schema
@@ -92,11 +94,9 @@ export const getApiProvider = refused('pi-ai.getApiProvider');
 export const getApiProviders = refused('pi-ai.getApiProviders');
 export const getEnvApiKey = helper('ai', 'getEnvApiKey');
 export const getImagesApiProvider = refused('pi-ai.getImagesApiProvider');
-export const googleGenerativeAIApi = refused('pi-ai.googleGenerativeAIApi');
 export const googleVertexApi = refused('pi-ai.googleVertexApi');
 export const mistralConversationsApi = refused('pi-ai.mistralConversationsApi');
 export const openAICodexResponsesApi = refused('pi-ai.openAICodexResponsesApi');
-export const openAICompletionsApi = refused('pi-ai.openAICompletionsApi');
 export const openAIResponsesApi = refused('pi-ai.openAIResponsesApi');
 export const piMessagesApi = refused('pi-ai.piMessagesApi');
 export const registerApiProvider = refused('pi-ai.registerApiProvider');

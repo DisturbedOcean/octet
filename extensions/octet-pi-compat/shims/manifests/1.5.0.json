@@ -380,7 +380,8 @@
         "source": "shim"
       },
       "googleGenerativeAIApi": {
-        "surface": "authority"
+        "surface": "inert",
+        "source": "shim"
       },
       "googleVertexApi": {
         "surface": "authority"
@@ -445,7 +446,8 @@
         "surface": "authority"
       },
       "openAICompletionsApi": {
-        "surface": "authority"
+        "surface": "inert",
+        "source": "shim"
       },
       "openAIResponsesApi": {
         "surface": "authority"
