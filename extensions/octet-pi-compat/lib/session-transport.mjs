@@ -36,7 +36,7 @@ export class SessionTransport {
         || profile.chunk_bytes > 65536 || !integer(frame, 1)) invalid('session transport profile');
     this.runtime = runtime; this.profile = Object.freeze({ ...profile }); this.frame = frame;
     this.bytes = 0; this.records = 0; this.views = 0; this.transfers = 0; this.projectionBytes = 0; this.projections = 0;
-    this.current = new Map(); this.activations = new Map();
+    this.current = new Map(); this.activations = new Map(); this.preparedDigests = new Map();
   }
   reserve(d) {
     const p = this.profile, records = d.entry_count + d.branch_count;
@@ -133,7 +133,10 @@ export class SessionTransport {
     try { await hydrate(); }
     catch (error) { this.drop(view); throw error; }
     finally { barrier.resolve?.(); if (this.current.get(key) === barrier) barrier.promise = undefined; }
-    for (const surface of this.runtime.ui.surfaces.values()) if (surface.store.state === store.state) surface.requestRender();
+    // Octet republishes an unchanged session on every idle UI pump; repainting then would request the next pump.
+    const changed = this.preparedDigests.get(key) !== d.sha256;
+    this.preparedDigests.set(key, d.sha256);
+    for (const surface of this.runtime.ui.surfaces.values()) if (surface.store.state === store.state && (changed || surface.awaitingSessionView)) surface.requestRender();
     return { accepted: true, transfer_id: d.transfer_id, view_revision: d.view_revision, head: d.head, sha256: d.sha256 };
   }
   async hydrate(params, store) {

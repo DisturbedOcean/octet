@@ -542,13 +542,13 @@ export class RemoteUI {
     // readiness or a publication barrier, which would delay frames under load.
     const columns = surface.columns, rows = surface.rows;
     let lines;
-    try { lines = this.runtime.scope.run(surface.store, () => surface.tui.render(columns)); }
+    try { lines = this.runtime.scope.run(surface.store, () => surface.tui.render(columns)); surface.awaitingSessionView = false; }
     catch (error) {
       if (nativeRetirements.get(error) === surface) return;
       // History-reading components cannot render a missing publication as an
       // empty session. Retain their last frame without blocking native paint or
       // retiring the mount; successful preparation requests another render.
-      if (error?.code === -32002 && error.message === 'session view unavailable') return;
+      if (error?.code === -32002 && error.message === 'session view unavailable') { surface.awaitingSessionView = true; return; }
       throw error;
     }
     // Capture lines and this exact barrier in the same synchronous turn. Never

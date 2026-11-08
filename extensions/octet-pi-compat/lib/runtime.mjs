@@ -834,10 +834,12 @@ export class Runtime {
     }
     const next = plainJSON(params.host, 'host snapshot', 524288);
     if (Object.hasOwn(next, 'theme')) nativeTheme(next.theme);
+    // Session fields and the revision belong to the routed view, which repaints from preparation.
+    const repaint = Object.entries(next).some(([field, value]) => !field.startsWith('session_') && !isDeepStrictEqual(state.host[field], value));
     const previous = state.host.git_branch; state.host = { ...state.host, ...next };
     retainPiProjectTrust(state);
     if (previous !== state.host.git_branch) for (const listener of state.branchListeners) listener();
-    for (const surface of this.ui.surfaces.values()) if (surface.store.state === state) this.scope.run(surface.store, () => { surface.tui.invalidate(); surface.requestRender(); });
+    if (repaint) for (const surface of this.ui.surfaces.values()) if (surface.store.state === state) this.scope.run(surface.store, () => { surface.tui.invalidate(); surface.requestRender(); });
   }
 
   async runEvent(event, value, store, { veto = false } = {}) {
